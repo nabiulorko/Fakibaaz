@@ -702,6 +702,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Show the "Topic Saved!" confirmation + balloons here, on the run AFTER the
+# save. Firing them in the same run as the save and then immediately calling
+# st.rerun() (as the Finish button used to) meant the rerun tore the page
+# down before the browser had a chance to actually paint them — the message
+# would flash or skip entirely. Stashing the result in session_state and
+# rendering it on this fresh run instead makes it show reliably every time.
+_last_result = st.session_state.pop("last_finish_result", None)
+if _last_result:
+    if _last_result["score"] >= 10.0:
+        st.balloons()
+    st.success(
+        f"Topic Saved! Task Score: {_last_result['score']} pts · "
+        f"Tier: {_last_result['rank_label']} · +{_last_result['xp']} XP earned"
+    )
+
 # --------------------------------------------------------------------------------------
 # SESSION SETUP — Date, Subject, Topic & Target Minutes, all on one page
 # --------------------------------------------------------------------------------------
@@ -865,12 +880,8 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
         save_row(row, user_id)
 
     st.session_state.finish_submitting = False
+    st.session_state.last_finish_result = {"score": score, "rank_label": rank_label, "xp": xp}
 
-    if score >= 10.0:
-        st.balloons()
-        
-    st.success(f"Topic Saved! Task Score: {score} pts · Tier: {rank_label} · +{xp} XP earned")
-    
     # Reset session
     st.session_state.running = False
     st.session_state.elapsed = 0.0
