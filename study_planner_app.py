@@ -25,6 +25,8 @@ from google.oauth2.service_account import Credentials
 # --------------------------------------------------------------------------------------
 # CONFIG & CONSTANTS
 # --------------------------------------------------------------------------------------
+st.write("")
+st.write("")
 DATA_FILE = "study_data.csv"  # kept only as a local fallback name; primary storage is now Google Sheets
 LOGO_PATH = "logo.jpg"
 SHEET_TAB_NAME = "StudyData"
@@ -140,27 +142,23 @@ st.markdown("""
   letter-spacing: 0.3px;
 }
 
-/* Hide Streamlit's default top toolbar/header bar entirely — its reserved
-   space was pushing into (and clipping) our custom logo+title header above
-   the divider. With it hidden we only need a small breathing-room padding. */
-[data-testid="stHeader"] {
-  height: 0px;
-  visibility: hidden;
-}
-
-/* Hide Streamlit's built-in toolbar (includes a circular "Rerun" sync-style
-   icon, plus deploy/menu buttons) that floats near the top of the app. */
-[data-testid="stToolbar"] {
-  display: none !important;
-  visibility: hidden !important;
-}
-
 .block-container {
   padding-top: 1.5rem !important;
 }
 
 html, body, [class*="css"], [class*="st-"], .stApp, .stApp * {
   font-family: 'Poppins', sans-serif !important;
+}
+
+/* Exclude Streamlit's ligature-based icon font (used for the sidebar
+   collapse/expand arrows and other built-in icons) from the Poppins
+   override above — otherwise the icon ligature text (e.g.
+   "keyboard_double_arrow_right") renders as literal text instead of
+   the actual glyph. */
+[data-testid="stIconMaterial"],
+span[class*="material-icons"],
+span[class*="material-symbols"] {
+  font-family: 'Material Symbols Rounded', 'Material Icons' !important;
 }
 
 html, body {
@@ -551,10 +549,8 @@ def current_elapsed():
 # --------------------------------------------------------------------------------------
 # STUDENT ID GATE — same ID on any device loads the same saved data
 # --------------------------------------------------------------------------------------
-# Deliberately rendered in the MAIN page body, not the sidebar — the sidebar's
-# open/close control is hidden by some of the header-hiding CSS above (and that
-# behavior varies across Streamlit versions), so anything essential shouldn't
-# depend on the sidebar being reachable.
+# Deliberately rendered in the MAIN page body, not the sidebar, so anything
+# essential doesn't depend on the sidebar being open.
 if not st.session_state.get("user_id"):
     st.markdown("## 👋 Welcome to Fakibaaz")
     _id_input = st.text_input(
