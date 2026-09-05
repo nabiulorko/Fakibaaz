@@ -677,7 +677,7 @@ if not st.session_state.get("user_id"):
     )
     st.markdown('<div class="id-gate-block">', unsafe_allow_html=True)
     _id_input = st.text_input(
-        "🔑 Enter your Student ID (e.g. 2202195)",
+        "🔑 Enter your Student ID (e.g. 2202515)",
         help="Use the same ID on your laptop and phone to see the same saved sessions.",
     )
     st.caption("This ID isn't a password — it's just a lookup key. Anyone who enters the "
