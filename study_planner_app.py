@@ -54,7 +54,7 @@ DEFAULT_SUBJECTS = [
 ]
 
 COLUMNS = [
-    "UserID", "Date", "Subject", "Topic", "Teacher",
+    "UserID", "Date", "Subject", "Topic",
     "Assigned Min", "Actual Min", "Distractions",
     "Score", "Rank", "XP", "Timestamp"
 ]
@@ -83,6 +83,12 @@ st.markdown("""
   margin: 6px 0 4px 0;
 }
 
+@media (max-width: 640px) {
+  .fakibaaz-header {
+    justify-content: center;
+  }
+}
+
 .fakibaaz-header img {
   height: 46px;
   width: auto;
@@ -109,6 +115,47 @@ st.markdown("""
   margin: 0 0 14px 0;
   border-radius: 999px;
   opacity: 0.85;
+}
+
+/* ID gate (Student ID entry screen) — left-aligned like everything else on
+   desktop, but centered on mobile so the logo/heading/input/button all sit
+   stacked in the middle of a narrow screen instead of hugging the left edge. */
+@media (max-width: 640px) {
+  .id-gate-header {
+    justify-content: center;
+  }
+  .id-gate-block {
+    text-align: center;
+  }
+  .id-gate-block [data-testid="stTextInput"],
+  .id-gate-block [data-testid="stButton"],
+  .id-gate-block [data-testid="stCaptionContainer"] {
+    display: flex;
+    justify-content: center;
+    text-align: center;
+  }
+  .id-gate-block [data-testid="stTextInput"] > div,
+  .id-gate-block [data-testid="stButton"] > button {
+    margin: 0 auto;
+  }
+}
+
+/* Topic header + stats + timer block: left/right split on desktop, but
+   everything centered on mobile once the columns stack. */
+@media (max-width: 640px) {
+  .st-key-session_head [data-testid="stHorizontalBlock"] {
+    text-align: center;
+  }
+  .st-key-session_head [data-testid="stMarkdownContainer"] h3 {
+    text-align: center;
+  }
+  .st-key-session_head .session-stats-block {
+    text-align: center !important;
+  }
+  .st-key-session_head [data-testid="stCaptionContainer"] {
+    text-align: center;
+    justify-content: center;
+  }
 }
 
 /* Sidebar brand — logo + wordmark inline, no extra vertical gap */
@@ -267,6 +314,66 @@ html, body {
   transform: translateY(-2px);
 }
 
+/* Session Breakdown task cards — flex-wrap lets each label:value pair reflow
+   onto its own line on narrow/mobile screens instead of being squeezed into
+   fixed-width table columns. */
+.task-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.task-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 78px;
+  flex: 1 1 78px;
+}
+
+.tf-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #94a3b8;
+  margin-bottom: 2px;
+}
+
+.tf-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e293b;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  .task-card {
+    padding: 10px 12px;
+    gap: 6px 14px;
+  }
+  .task-field {
+    min-width: 100px;
+    flex: 1 1 42%;
+  }
+}
+
+/* Delete button next to each task card: vertically centered against the
+   card on desktop; auto/compact on mobile where it sits stacked below
+   the card instead. */
+.st-key-task_rows [data-testid="stHorizontalBlock"] {
+  align-items: center;
+}
+@media (max-width: 640px) {
+  .st-key-task_rows [data-testid="stHorizontalBlock"] {
+    align-items: flex-start;
+  }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -317,6 +424,14 @@ def load_data(user_id: str) -> pd.DataFrame:
     df = df[df["UserID"].astype(str) == str(user_id)].reset_index(drop=True)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
+        # get_all_records() infers each cell's type from how it looks in the Sheet,
+        # so a column like "Score" can come back as a mix of int/float/str (e.g. a
+        # blank cell reads as ""). That mixed-type "object" column then blows up on
+        # .sum(). Force the numeric columns to actual numbers, treating anything
+        # unparseable (blanks, stray text) as 0.
+        numeric_cols = ["Assigned Min", "Actual Min", "Distractions", "Score", "XP"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     return df[COLUMNS]
 
 def save_row(row: dict, user_id: str):
@@ -353,7 +468,7 @@ def export_to_excel(user_id: str, path="Study_Planner_Log.xlsx"):
     export = df.rename(columns={
         "Subject": "Course", "Assigned Min": "Assigned Time", "Actual Min": "Time Taken"
     })
-    cols_to_export = [c for c in ["Date", "Course", "Topic", "Teacher", "Assigned Time", "Time Taken", "Distractions", "Score", "Rank", "XP"] if c in export.columns]
+    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Distractions", "Score", "Rank", "XP"] if c in export.columns]
     export[cols_to_export].to_excel(path, index=False)
     return path
 
@@ -552,7 +667,15 @@ def current_elapsed():
 # Deliberately rendered in the MAIN page body, not the sidebar, so anything
 # essential doesn't depend on the sidebar being open.
 if not st.session_state.get("user_id"):
-    st.markdown("## 👋 Welcome to Fakibaaz")
+    _gate_logo_tag = f'<img src="{_logo_base64(LOGO_PATH)}" alt="Fakibaaz logo">' if os.path.exists(LOGO_PATH) else ""
+    st.markdown(
+        f"""<div class="fakibaaz-header id-gate-header">
+            {_gate_logo_tag}
+            <div class="fakibaaz-brand">Fakibaaz</div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="id-gate-block">', unsafe_allow_html=True)
     _id_input = st.text_input(
         "🔑 Enter your Student ID (e.g. 2202195)",
         help="Use the same ID on your laptop and phone to see the same saved sessions.",
@@ -565,6 +688,7 @@ if not st.session_state.get("user_id"):
             st.rerun()
         else:
             st.warning("Please type an ID first.")
+    st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
 user_id = st.session_state["user_id"]
@@ -588,10 +712,10 @@ st.markdown(
 )
 
 # --------------------------------------------------------------------------------------
-# SESSION SETUP — Date, Subject, Teacher, Topic & Target Minutes, all on one page
+# SESSION SETUP — Date, Subject, Topic & Target Minutes, all on one page
 # --------------------------------------------------------------------------------------
 st.markdown("##### 📝 Session Setup")
-setup_c1, setup_c2, setup_c3, setup_c4, setup_c5 = st.columns([1.1, 1.5, 1.2, 1.6, 1])
+setup_c1, setup_c2, setup_c4, setup_c5 = st.columns([1.1, 1.5, 1.6, 1])
 
 with setup_c1:
     the_date = st.date_input(
@@ -614,9 +738,6 @@ with setup_c2:
             subject = new_sub if new_sub else "General Study"
     else:
         subject = subject_choice
-
-with setup_c3:
-    teacher = st.text_input("Teacher (optional)")
 
 with setup_c4:
     topic = st.text_input("Topic Name", placeholder="e.g. Carcinogenesis / Chapter 3")
@@ -648,37 +769,40 @@ today_tier, today_tier_cls = compute_tier(today_total_score)  # Tier now reflect
 
 auto_topic_name = f"Topic {today_tasks + 1}"
 topic_display = topic if topic else auto_topic_name
-head_left, head_stats = st.columns([2.0, 3.8])
 
-with head_left:
-    st.markdown(f"### 📖 {subject}  ·  *{topic_display}*")
+session_head_box = st.container(key="session_head")
+with session_head_box:
+    head_left, head_stats = st.columns([2.0, 3.8])
 
-with head_stats:
-    st.markdown(f"""
-    <div style="text-align:right; line-height:1.7; padding-top:4px;">
-      <span class="badge {today_tier_cls}" style="font-size:15px; padding:6px 16px;">{today_tier}</span>
-      <br>
-      <span style="font-size:15px; font-weight:600; color:#1e293b;">⭐ Lvl {user_level}</span>
-      &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">✅ {today_tasks} Job{'s' if today_tasks != 1 else ''}</span>
-      &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">🎯 {today_total_score:.1f} pts</span>
-      &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">⭐ +{today_total_xp} XP</span>
-      <br>
-      <span style="font-size:13px; font-weight:600; color:#94a3b8;">(Overall: {total_score:.1f} pts · {total_xp:,} XP)</span>
-    </div>
-    """, unsafe_allow_html=True)
+    with head_left:
+        st.markdown(f"### 📖 {subject}  ·  *{topic_display}*")
 
-elapsed = current_elapsed()
+    with head_stats:
+        st.markdown(f"""
+        <div class="session-stats-block" style="text-align:right; line-height:1.7; padding-top:4px;">
+          <span class="badge {today_tier_cls}" style="font-size:15px; padding:6px 16px;">{today_tier}</span>
+          <br>
+          <span style="font-size:15px; font-weight:600; color:#1e293b;">⭐ Lvl {user_level}</span>
+          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">✅ {today_tasks} Job{'s' if today_tasks != 1 else ''}</span>
+          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">🎯 {today_total_score:.1f} pts</span>
+          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">⭐ +{today_total_xp} XP</span>
+          <br>
+          <span style="font-size:13px; font-weight:600; color:#94a3b8;">(Overall: {total_score:.1f} pts · {total_xp:,} XP)</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-target_sec = assigned_min * 60
-remaining = target_sec - elapsed
+    elapsed = current_elapsed()
 
-if remaining >= 0:
-    running_cls = " timer-running" if st.session_state.running else ""
-    st.markdown(f'<div class="timer-container"><div class="timer-display{running_cls}">{fmt_time(remaining)}</div></div>', unsafe_allow_html=True)
-    st.caption(f"⏱ Time remaining · Elapsed: {fmt_time(elapsed)} of {assigned_min}m")
-else:
-    st.markdown(f'<div class="timer-container"><div class="timer-overtime">+{fmt_time(-remaining)}</div></div>', unsafe_allow_html=True)
-    st.caption("⏰ Over target time — finish up topic to avoid score deduction!")
+    target_sec = assigned_min * 60
+    remaining = target_sec - elapsed
+
+    if remaining >= 0:
+        running_cls = " timer-running" if st.session_state.running else ""
+        st.markdown(f'<div class="timer-container"><div class="timer-display{running_cls}">{fmt_time(remaining)}</div></div>', unsafe_allow_html=True)
+        st.caption(f"⏱ Time remaining · Elapsed: {fmt_time(elapsed)} of {assigned_min}m")
+    else:
+        st.markdown(f'<div class="timer-container"><div class="timer-overtime">+{fmt_time(-remaining)}</div></div>', unsafe_allow_html=True)
+        st.caption("⏰ Over target time — finish up topic to avoid score deduction!")
 
 if st.session_state.running:
     st_autorefresh(interval=1000, key="focus_tick")
@@ -739,7 +863,6 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
         "Date": pd.to_datetime(the_date),
         "Subject": subject,
         "Topic": topic if topic else auto_topic_name,
-        "Teacher": teacher,
         "Assigned Min": assigned_min,
         "Actual Min": actual_min,
         "Distractions": st.session_state.distractions,
@@ -802,20 +925,28 @@ else:
                 unsafe_allow_html=True)
 
     st.markdown("#### Session Breakdown")
-    display_cols = [c for c in ["Subject", "Topic", "Teacher", "Assigned Min", "Actual Min", "Distractions", "Score", "XP"] if c in today_df.columns]
+    display_cols = [c for c in ["Subject", "Topic", "Assigned Min", "Actual Min", "Distractions", "Score", "XP"] if c in today_df.columns]
 
-    with st.container(border=True):
-        header_cols = st.columns([1.4, 1.4, 1.0, 0.9, 0.9, 0.9, 0.7, 0.7, 0.5])
-        for hc, label in zip(header_cols, display_cols + [""]):
-            hc.markdown(f"**{label}**")
-
+    # Card layout instead of a fixed-width column "table" — a rigid multi-column
+    # grid has no room to reflow on narrow/mobile screens and just squishes each
+    # column until text wraps or overlaps. Each task is its own card with
+    # label:value pairs that wrap naturally at any screen width, so it reads
+    # fine on both desktop and mobile. Wrapped in a keyed container so the CSS
+    # below can target just these delete buttons.
+    with st.container(key="task_rows"):
         for row_idx, row in today_df.iterrows():
-            rc = st.columns([1.4, 1.4, 1.0, 0.9, 0.9, 0.9, 0.7, 0.7, 0.5])
-            for rc_col, col_name in zip(rc, display_cols):
-                val = row[col_name]
-                rc_col.write(val if pd.notna(val) and val != "" else "—")
-            with rc[-1]:
-                if st.button("🗑️", key=f"del_today_{row_idx}", help="Remove this task"):
+            card_col, del_col = st.columns([9, 1])
+            with card_col:
+                fields_html = "".join(
+                    f"""<div class="task-field">
+                            <span class="tf-label">{col_name}</span>
+                            <span class="tf-value">{row[col_name] if pd.notna(row[col_name]) and row[col_name] != "" else "—"}</span>
+                        </div>"""
+                    for col_name in display_cols
+                )
+                st.markdown(f'<div class="task-card">{fields_html}</div>', unsafe_allow_html=True)
+            with del_col:
+                if st.button("🗑️", key=f"del_today_{row_idx}", help="Remove this task", use_container_width=True):
                     if delete_row_by_index(row_idx, user_id):
                         st.success("Task removed.")
                         st.rerun()
