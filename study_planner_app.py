@@ -12,9 +12,10 @@ Run with:
     .venv/bin/streamlit run study_planner_app.py
 """
 
-import os
 import time
 import base64
+import html
+from pathlib import Path
 from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
@@ -25,8 +26,9 @@ from google.oauth2.service_account import Credentials
 # --------------------------------------------------------------------------------------
 # CONFIG & CONSTANTS
 # --------------------------------------------------------------------------------------
-DATA_FILE = "study_data.csv"  # kept only as a local fallback name; primary storage is now Google Sheets
-LOGO_PATH = "logo.jpg"
+APP_DIR = Path(__file__).resolve().parent
+DATA_FILE = APP_DIR / "study_data.csv"  # kept only as a local fallback name; primary storage is now Google Sheets
+LOGO_PATH = APP_DIR / "logo.jpg"
 SHEET_TAB_NAME = "StudyData"
 SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -385,90 +387,170 @@ html, body {
 
 @st.cache_resource(show_spinner=False)
 def _get_worksheet():
-    """One authenticated connection to the Google Sheet, reused for the whole app
-    session (not per-user — the sheet itself holds every user's rows, filtered by
-    UserID in load_data)."""
+    """Returns the gspread Worksheet if Google Sheets credentials are configured and valid,
+    or None if credentials are missing or connection fails (triggering CSV fallback)."""
     if "gcp_service_account" not in st.secrets or "sheet_id" not in st.secrets:
-        st.error(
-            "⚠️ Cloud storage isn't configured yet. Add your `gcp_service_account` "
-            "credentials and `sheet_id` to `.streamlit/secrets.toml` (see SETUP_GOOGLE_SHEETS.md)."
-        )
-        st.stop()
-    creds = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]), scopes=SHEETS_SCOPES
-    )
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(st.secrets["sheet_id"])
+        return None
     try:
-        ws = sh.worksheet(SHEET_TAB_NAME)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=SHEET_TAB_NAME, rows=2000, cols=len(COLUMNS) + 2)
-        ws.append_row(COLUMNS)
-    return ws
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=SHEETS_SCOPES
+        )
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(st.secrets["sheet_id"])
+        try:
+            ws = sh.worksheet(SHEET_TAB_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=SHEET_TAB_NAME, rows=2000, cols=len(COLUMNS) + 2)
+            ws.append_row(COLUMNS)
+        return ws
+    except Exception:
+        return None
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def load_data(user_id: str) -> pd.DataFrame:
-    """Load only this user's rows from the shared Sheet. Cached briefly so the
-    1-second timer auto-refresh doesn't hammer the Sheets API; save/delete clear
-    this cache so changes show up immediately."""
+    """Load only this user's rows from Google Sheets or local CSV fallback."""
     ws = _get_worksheet()
-    records = ws.get_all_records()
-    df = pd.DataFrame(records)
+    df = pd.DataFrame()
+    if ws is not None:
+        try:
+            records = ws.get_all_records()
+            df = pd.DataFrame(records)
+        except Exception:
+            df = pd.DataFrame(columns=COLUMNS)
+    else:
+        if DATA_FILE.exists():
+            try:
+                df = pd.read_csv(DATA_FILE)
+            except Exception:
+                df = pd.DataFrame(columns=COLUMNS)
+        else:
+            df = pd.DataFrame(columns=COLUMNS)
+
     for col in COLUMNS:
         if col not in df.columns:
             df[col] = ""
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
+
     df = df[df["UserID"].astype(str) == str(user_id)].reset_index(drop=True)
     if not df.empty:
-        df["Date"] = pd.to_datetime(df["Date"])
-        # get_all_records() infers each cell's type from how it looks in the Sheet,
-        # so a column like "Score" can come back as a mix of int/float/str (e.g. a
-        # blank cell reads as ""). That mixed-type "object" column then blows up on
-        # .sum(). Force the numeric columns to actual numbers, treating anything
-        # unparseable (blanks, stray text) as 0.
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         numeric_cols = ["Assigned Min", "Actual Min", "Score", "XP"]
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     return df[COLUMNS]
 
-def save_row(row: dict, user_id: str):
-    ws = _get_worksheet()
+def _append_local_row(row: dict):
+    df_row = pd.DataFrame([[row.get(c, "") for c in COLUMNS]], columns=COLUMNS)
+    if DATA_FILE.exists():
+        df_row.to_csv(DATA_FILE, mode="a", header=False, index=False)
+    else:
+        df_row.to_csv(DATA_FILE, index=False)
+
+def save_row(row: dict, user_id: str) -> bool:
     row = dict(row)
     row["UserID"] = user_id
     if isinstance(row.get("Date"), (pd.Timestamp, date, datetime)):
         row["Date"] = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
-    values = [str(row.get(c, "")) for c in COLUMNS]
-    ws.append_row(values, value_input_option="USER_ENTERED")
-    load_data.clear()
 
-def delete_row_by_index(idx: int, user_id: str):
-    """idx is the row's position within THIS user's filtered view (as shown in the
-    UI), so we re-find that user's rows in sheet order to get the real sheet row."""
     ws = _get_worksheet()
-    all_values = ws.get_all_values()
-    if not all_values:
-        return False
-    header = all_values[0]
-    if "UserID" not in header:
-        return False
-    user_col = header.index("UserID")
-    matches = [i for i, r in enumerate(all_values[1:], start=2)
-               if len(r) > user_col and r[user_col] == str(user_id)]
-    if 0 <= idx < len(matches):
-        ws.delete_rows(matches[idx])
-        load_data.clear()
-        return True
-    return False
+    if ws is not None:
+        try:
+            values = [str(row.get(c, "")) for c in COLUMNS]
+            ws.append_row(values, value_input_option="USER_ENTERED")
+        except Exception as e:
+            st.warning(f"Cloud save failed; saved locally instead. Details: {e}")
+            try:
+                _append_local_row(row)
+            except Exception as local_error:
+                st.error(f"Failed to save locally: {local_error}")
+                return False
+    else:
+        try:
+            _append_local_row(row)
+        except Exception as e:
+            st.error(f"Failed to save locally: {e}")
+            return False
+    load_data.clear()
+    return True
+
+def delete_row(user_id: str, row_data: dict) -> bool:
+    """Delete a specific row matching UserID and Timestamp (or exact attributes)."""
+    ws = _get_worksheet()
+    target_ts = str(row_data.get("Timestamp", ""))
+    target_sub = str(row_data.get("Subject", ""))
+    target_top = str(row_data.get("Topic", ""))
+
+    if ws is not None:
+        try:
+            all_values = ws.get_all_values()
+            if not all_values:
+                return False
+            header = all_values[0]
+            if "UserID" not in header:
+                return False
+            user_col = header.index("UserID")
+            ts_col = header.index("Timestamp") if "Timestamp" in header else -1
+
+            for i, r in enumerate(all_values[1:], start=2):
+                if len(r) > user_col and r[user_col] == str(user_id):
+                    match = False
+                    if ts_col != -1 and len(r) > ts_col and target_ts:
+                        match = (r[ts_col] == target_ts)
+                    else:
+                        match = (len(r) > 3 and r[2] == target_sub and r[3] == target_top)
+                    if match:
+                        ws.delete_rows(i)
+                        load_data.clear()
+                        return True
+            return False
+        except Exception as e:
+            st.error(f"Error deleting from Google Sheets: {e}")
+            return False
+    else:
+        if not DATA_FILE.exists():
+            return False
+        try:
+            df = pd.read_csv(DATA_FILE)
+            if df.empty:
+                return False
+            if target_ts and "Timestamp" in df.columns:
+                mask = (df["UserID"].astype(str) == str(user_id)) & (df["Timestamp"].astype(str) == target_ts)
+            else:
+                mask = (df["UserID"].astype(str) == str(user_id)) & \
+                       (df["Subject"].astype(str) == target_sub) & \
+                       (df["Topic"].astype(str) == target_top)
+
+            df_to_keep = df[~mask]
+            if len(df_to_keep) < len(df):
+                df_to_keep.to_csv(DATA_FILE, index=False)
+                load_data.clear()
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Error deleting from CSV: {e}")
+            return False
 
 def export_to_excel(user_id: str, path="Study_Planner_Log.xlsx"):
     df = load_data(user_id)
+    if df.empty:
+        return None
     export = df.rename(columns={
         "Subject": "Course", "Assigned Min": "Assigned Time", "Actual Min": "Time Taken"
     })
     cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank", "XP"] if c in export.columns]
-    export[cols_to_export].to_excel(path, index=False)
-    return path
+    export[cols_to_export].to_excel(APP_DIR / path, index=False)
+    return str(APP_DIR / path)
+
+def get_export_csv(user_id: str) -> str:
+    df = load_data(user_id)
+    if df.empty:
+        return ""
+    export = df.rename(columns={
+        "Subject": "Course", "Assigned Min": "Assigned Time", "Actual Min": "Time Taken"
+    })
+    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank", "XP"] if c in export.columns]
+    return export[cols_to_export].to_csv(index=False)
 
 # --------------------------------------------------------------------------------------
 # NEW 5-PART SCORING, XP, LEVEL, TIER & RANKING SYSTEM
@@ -585,13 +667,18 @@ def compute_tier(total_score: float):
     if total_score >= 100: return "🥈 Silver", "badge-silver"
     return "🪨 Bronze", "badge-bronze"
 
-def compute_streak(df: pd.DataFrame) -> int:
+def compute_streak(df: pd.DataFrame, target_date: date = None) -> int:
+    if target_date is None:
+        target_date = study_day(datetime.now())
+
     if df.empty:
-        return 0
-    days = set(pd.to_datetime(df["Date"]).dt.date)
-    streak, cur = 0, date.today()
-    if cur not in days and (cur - timedelta(days=1)) in days:
-        cur -= timedelta(days=1)
+        days = {target_date}
+    else:
+        days = set(pd.to_datetime(df["Date"], errors="coerce").dt.date.dropna())
+        days.add(target_date)
+
+    streak = 0
+    cur = target_date
     while cur in days:
         streak += 1
         cur -= timedelta(days=1)
@@ -658,7 +745,8 @@ def current_elapsed():
 # Deliberately rendered in the MAIN page body, not the sidebar, so anything
 # essential doesn't depend on the sidebar being open.
 if not st.session_state.get("user_id"):
-    _gate_logo_tag = f'<img src="{_logo_base64(LOGO_PATH)}" alt="Fakibaaz logo">' if os.path.exists(LOGO_PATH) else ""
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _gate_logo_tag = f'<img src="{_logo_base64(LOGO_PATH)}" alt="Fakibaaz logo">' if LOGO_PATH.exists() else ""
     st.markdown(
         f"""<div class="fakibaaz-header id-gate-header">
             {_gate_logo_tag}
@@ -685,6 +773,22 @@ if not st.session_state.get("user_id"):
 user_id = st.session_state["user_id"]
 with st.sidebar:
     st.success(f"Signed in as **{user_id}**")
+    ws_check = _get_worksheet()
+    if ws_check is not None:
+        st.caption("🟢 Storage: Cloud (Google Sheets)")
+    else:
+        st.caption("📁 Storage: Local CSV (`study_data.csv`)")
+
+    csv_data = get_export_csv(user_id)
+    if csv_data:
+        st.download_button(
+            label="📥 Export Study Log (CSV)",
+            data=csv_data,
+            file_name=f"Fakibaaz_Study_Log_{user_id}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
     if st.button("Switch ID"):
         del st.session_state["user_id"]
         st.rerun()
@@ -692,7 +796,8 @@ with st.sidebar:
 # --------------------------------------------------------------------------------------
 # MAIN UI AREA — TOP BRAND HEADER & STRAIGHT LINE DIVIDER
 # --------------------------------------------------------------------------------------
-logo_img_tag = f'<img src="{_logo_base64(LOGO_PATH)}" alt="Fakibaaz logo">' if os.path.exists(LOGO_PATH) else ""
+st.markdown("<br><br>", unsafe_allow_html=True)
+logo_img_tag = f'<img src="{_logo_base64(LOGO_PATH)}" alt="Fakibaaz logo">' if LOGO_PATH.exists() else ""
 st.markdown(
     f"""<div class="fakibaaz-header">
         {logo_img_tag}
@@ -733,16 +838,28 @@ with setup_c1:
     )
 
 with setup_c2:
+    if "selected_subject" not in st.session_state:
+        st.session_state["selected_subject"] = DEFAULT_SUBJECTS[0]
+
     all_subjects = DEFAULT_SUBJECTS + st.session_state.custom_subjects + ["+ Add Custom Subject..."]
-    subject_choice = st.selectbox("Course Subject", all_subjects)
+    if st.session_state["selected_subject"] not in all_subjects:
+        all_subjects.insert(len(all_subjects) - 1, st.session_state["selected_subject"])
+
+    curr_idx = all_subjects.index(st.session_state["selected_subject"]) if st.session_state["selected_subject"] in all_subjects else 0
+    subject_choice = st.selectbox("Course Subject", all_subjects, index=curr_idx)
+
     if subject_choice == "+ Add Custom Subject...":
         new_sub = st.text_input("Enter custom subject name")
-        if new_sub and new_sub not in st.session_state.custom_subjects:
-            st.session_state.custom_subjects.append(new_sub)
-            subject = new_sub
+        if new_sub and new_sub.strip():
+            clean_sub = new_sub.strip()
+            if clean_sub not in st.session_state.custom_subjects and clean_sub not in DEFAULT_SUBJECTS:
+                st.session_state.custom_subjects.append(clean_sub)
+            st.session_state["selected_subject"] = clean_sub
+            st.rerun()
         else:
-            subject = new_sub if new_sub else "General Study"
+            subject = "General Study"
     else:
+        st.session_state["selected_subject"] = subject_choice
         subject = subject_choice
 
 with setup_c4:
@@ -757,7 +874,7 @@ st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 # STATS (computed up-front so they can sit compactly next to the header,
 # instead of a separate full-height side column stretching past the timer)
 # --------------------------------------------------------------------------------------
-df_all = load_data(user_id)
+df_all = load_data(user_id).copy()
 total_score = float(df_all["Score"].sum()) if not df_all.empty else 0.0
 total_xp = int(df_all["XP"].sum()) if not df_all.empty else 0
 user_level = compute_level(total_xp)  # Level/XP stay lifetime — never decreases, per the guide
@@ -849,46 +966,51 @@ if st.session_state.get("finish_submitting", False):
 
 if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=True, disabled=finish_disabled):
     st.session_state.finish_submitting = True
-    with st.spinner("💾 Saving your session..."):
-        actual_min = round(current_elapsed() / 60, 2)
-        score = compute_task_score(assigned_min, actual_min)
+    save_ok = False
+    try:
+        with st.spinner("💾 Saving your session..."):
+            actual_min = round(current_elapsed() / 60, 2)
+            score = compute_task_score(assigned_min, actual_min)
 
-        df_existing = load_data(user_id)
-        if not df_existing.empty:
-            df_existing["Date"] = pd.to_datetime(df_existing["Date"]).dt.date
-            is_first_today = len(df_existing[df_existing["Date"] == the_date]) == 0
-        else:
-            is_first_today = True
+            df_existing = load_data(user_id).copy()
+            if not df_existing.empty:
+                df_existing_dated = df_existing.copy()
+                df_existing_dated["Date"] = pd.to_datetime(df_existing_dated["Date"], errors="coerce").dt.date
+                is_first_today = len(df_existing_dated[df_existing_dated["Date"] == the_date]) == 0
+            else:
+                is_first_today = True
 
-        streak = compute_streak(df_existing)
-        xp = compute_task_xp(assigned_min, actual_min, is_first_today, streak)
+            streak = compute_streak(df_existing, target_date=the_date)
+            xp = compute_task_xp(assigned_min, actual_min, is_first_today, streak)
 
-        total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
-        rank_label, rank_cls = compute_tier(total_score_so_far)
+            total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
+            rank_label, rank_cls = compute_tier(total_score_so_far)
 
-        row = {
-            "Date": pd.to_datetime(the_date),
-            "Subject": subject,
-            "Topic": topic if topic else auto_topic_name,
-            "Assigned Min": assigned_min,
-            "Actual Min": actual_min,
-            "Score": score,
-            "Rank": rank_label,
-            "XP": xp,
-            "Timestamp": datetime.now().isoformat(timespec="seconds")
-        }
-        save_row(row, user_id)
+            row = {
+                "Date": the_date.strftime("%Y-%m-%d") if isinstance(the_date, (date, datetime)) else str(the_date),
+                "Subject": subject,
+                "Topic": topic if topic else auto_topic_name,
+                "Assigned Min": assigned_min,
+                "Actual Min": actual_min,
+                "Score": score,
+                "Rank": rank_label,
+                "XP": xp,
+                "Timestamp": datetime.now().isoformat(timespec="seconds")
+            }
+            save_ok = save_row(row, user_id)
 
-    st.session_state.finish_submitting = False
-    st.session_state.last_finish_result = {"score": score, "rank_label": rank_label, "xp": xp}
+        if save_ok:
+            st.session_state.last_finish_result = {"score": score, "rank_label": rank_label, "xp": xp}
 
-    # Reset session
-    st.session_state.running = False
-    st.session_state.elapsed = 0.0
-    st.session_state.start_ts = None
-    st.session_state.session_active = False
-    st.rerun()
-    
+            # Reset session only after the row is safely persisted.
+            st.session_state.running = False
+            st.session_state.elapsed = 0.0
+            st.session_state.start_ts = None
+            st.session_state.session_active = False
+            st.rerun()
+    finally:
+        st.session_state.finish_submitting = False
+
 if finish_disabled:
     st.caption("💡 Press ▶️ Start Focus to enable saving. (Leave Topic Name blank and it'll auto-save as "
                f"\"{auto_topic_name}\".)")
@@ -899,9 +1021,9 @@ if finish_disabled:
 st.markdown("---")
 st.markdown("## 📊 Today's Focus Report Card")
 
-df_all = load_data(user_id)
+df_all = load_data(user_id).copy()
 if not df_all.empty:
-    df_all["Date"] = pd.to_datetime(df_all["Date"]).dt.date
+    df_all["Date"] = pd.to_datetime(df_all["Date"], errors="coerce").dt.date
     today_df = df_all[df_all["Date"] == the_date]
 else:
     today_df = pd.DataFrame()
@@ -940,14 +1062,15 @@ else:
             with card_col:
                 fields_html = "".join(
                     f"""<div class="task-field">
-                            <span class="tf-label">{col_name}</span>
-                            <span class="tf-value">{row[col_name] if pd.notna(row[col_name]) and row[col_name] != "" else "—"}</span>
+                            <span class="tf-label">{html.escape(str(col_name))}</span>
+                            <span class="tf-value">{html.escape(str(row[col_name])) if pd.notna(row[col_name]) and row[col_name] != "" else "—"}</span>
                         </div>"""
                     for col_name in display_cols
                 )
                 st.markdown(f'<div class="task-card">{fields_html}</div>', unsafe_allow_html=True)
             with del_col:
-                if st.button("🗑️", key=f"del_today_{row_idx}", help="Remove this task", use_container_width=True):
-                    if delete_row_by_index(row_idx, user_id):
+                btn_key = f"del_today_{row_idx}_{row.get('Timestamp', '')}"
+                if st.button("🗑️", key=btn_key, help="Remove this task", use_container_width=True):
+                    if delete_row(user_id, row.to_dict()):
                         st.success("Task removed.")
                         st.rerun()
