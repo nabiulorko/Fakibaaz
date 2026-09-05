@@ -2,8 +2,8 @@
 🎓 Fakibaaz — Gamified Focus & Study Tracker
 ---------------------------------------------
 New 5-Part Scoring & Progression Engine:
-1. Task Score: Base 10 pts + (Time Saved / Assigned * 10) early bonus OR - (Late / Assigned * 10) deduction. -5 per distraction.
-2. XP System: Task (+10), Early (+5 or +10 if >=50%), No distraction (+3), Daily goal (+25), Streaks (+30/+75).
+1. Task Score: Base 10 pts + (Time Saved / Assigned * 10) early bonus OR - (Late / Assigned * 10) deduction.
+2. XP System: Task (+10), Early (+5 or +10 if >=50%), Daily goal (+25), Streaks (+30/+75).
 3. Level System: XP progression (L1: 0, L2: 100, L3: 250, L4: 450, L5: 700...).
 4. Tier System: Total Score determines Tier (Bronze, Silver, Gold, Platinum, Diamond, Master, Grandmaster).
 5. Ranking & Profile System: Complete Task -> Score + XP -> Tier + Level -> Ranking.
@@ -25,9 +25,6 @@ from google.oauth2.service_account import Credentials
 # --------------------------------------------------------------------------------------
 # CONFIG & CONSTANTS
 # --------------------------------------------------------------------------------------
-st.write=("")
-st.write=("")
-st.write=("")
 DATA_FILE = "study_data.csv"  # kept only as a local fallback name; primary storage is now Google Sheets
 LOGO_PATH = "logo.jpg"
 SHEET_TAB_NAME = "StudyData"
@@ -56,7 +53,7 @@ DEFAULT_SUBJECTS = [
 
 COLUMNS = [
     "UserID", "Date", "Subject", "Topic",
-    "Assigned Min", "Actual Min", "Distractions",
+    "Assigned Min", "Actual Min",
     "Score", "Rank", "XP", "Timestamp"
 ]
 
@@ -430,7 +427,7 @@ def load_data(user_id: str) -> pd.DataFrame:
         # blank cell reads as ""). That mixed-type "object" column then blows up on
         # .sum(). Force the numeric columns to actual numbers, treating anything
         # unparseable (blanks, stray text) as 0.
-        numeric_cols = ["Assigned Min", "Actual Min", "Distractions", "Score", "XP"]
+        numeric_cols = ["Assigned Min", "Actual Min", "Score", "XP"]
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     return df[COLUMNS]
@@ -469,21 +466,20 @@ def export_to_excel(user_id: str, path="Study_Planner_Log.xlsx"):
     export = df.rename(columns={
         "Subject": "Course", "Assigned Min": "Assigned Time", "Actual Min": "Time Taken"
     })
-    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Distractions", "Score", "Rank", "XP"] if c in export.columns]
+    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank", "XP"] if c in export.columns]
     export[cols_to_export].to_excel(path, index=False)
     return path
 
 # --------------------------------------------------------------------------------------
 # NEW 5-PART SCORING, XP, LEVEL, TIER & RANKING SYSTEM
 # --------------------------------------------------------------------------------------
-def _raw_task_score(assigned_min: float, actual_min: float, distractions: int) -> float:
+def _raw_task_score(assigned_min: float, actual_min: float) -> float:
     """
     🎯 1. Task Score (shared by the live preview and the final saved score):
     - Every task starts with 10 points.
     - Finish early  -> Bonus = (Time Saved / Assigned Time) * 10 ; Score = 10 + Bonus
     - Finish on time -> Score = 10
     - Finish late   -> Deduction = (Late Time / Assigned Time) * 10 ; Score = 10 - Deduction
-    - Distraction   -> -5 points per strike
 
     Example: a 20-min task finished in 13 min -> time saved 7 -> bonus (7/20)*10 = 3.5
     -> Score = 13.5.
@@ -504,10 +500,9 @@ def _raw_task_score(assigned_min: float, actual_min: float, distractions: int) -
         deduction = (late_time / max(assigned_min, 0.1)) * 10.0
         score = 10.0 - deduction
 
-    score -= (distractions * 5.0)
     return max(0.0, round(score, 1))
 
-def compute_task_score(assigned_min: float, actual_min: float, distractions: int) -> float:
+def compute_task_score(assigned_min: float, actual_min: float) -> float:
     """
     🎯 1. Task Score upon completion (see _raw_task_score for the formula).
     Minimum 0.5 mins (30s) focus required to earn any score — returns 0.0
@@ -515,15 +510,14 @@ def compute_task_score(assigned_min: float, actual_min: float, distractions: int
     """
     if actual_min < 0.5:
         return 0.0
-    return _raw_task_score(assigned_min, actual_min, distractions)
+    return _raw_task_score(assigned_min, actual_min)
 
-def compute_task_xp(assigned_min: float, actual_min: float, distractions: int, is_first_today: bool = False, streak: int = 0) -> int:
+def compute_task_xp(assigned_min: float, actual_min: float, is_first_today: bool = False, streak: int = 0) -> int:
     """
     ⭐ 2. XP System:
     - Complete task -> +10 XP
     - Finish early -> +5 XP
     - Finish >= 50% early -> +10 XP
-    - No distraction -> +3 XP
     - Daily goal (1st task today) -> +25 XP
     - 3-day streak -> +30 XP
     - 7-day streak -> +75 XP
@@ -538,9 +532,6 @@ def compute_task_xp(assigned_min: float, actual_min: float, distractions: int, i
             xp += 10  # Finish >= 50% early
         else:
             xp += 5   # Finish early
-
-    if distractions == 0:
-        xp += 3  # No distraction
 
     if is_first_today:
         xp += 25 # Daily goal bonus
@@ -845,7 +836,7 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
     st.session_state.finish_submitting = True
     with st.spinner("💾 Saving your session..."):
         actual_min = round(current_elapsed() / 60, 2)
-        score = compute_task_score(assigned_min, actual_min, 0)
+        score = compute_task_score(assigned_min, actual_min)
 
         df_existing = load_data(user_id)
         if not df_existing.empty:
@@ -855,7 +846,7 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
             is_first_today = True
 
         streak = compute_streak(df_existing)
-        xp = compute_task_xp(assigned_min, actual_min, 0, is_first_today, streak)
+        xp = compute_task_xp(assigned_min, actual_min, is_first_today, streak)
 
         total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
         rank_label, rank_cls = compute_tier(total_score_so_far)
@@ -866,7 +857,6 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
             "Topic": topic if topic else auto_topic_name,
             "Assigned Min": assigned_min,
             "Actual Min": actual_min,
-            "Distractions": 0,
             "Score": score,
             "Rank": rank_label,
             "XP": xp,
@@ -912,7 +902,6 @@ else:
     total_actual = today_df["Actual Min"].sum()
     today_score = today_df["Score"].sum()
     today_xp = int(today_df["XP"].sum())
-    total_distractions = int(today_df["Distractions"].sum())
 
     day_label, day_cls = compute_tier(today_score)  # Tier reflects THIS day's score, not lifetime
 
@@ -922,12 +911,11 @@ else:
     m3.metric("Today Task Score", f"{today_score:.1f} pts")
     m4.metric("Today XP", f"+{today_xp} XP")
 
-    st.markdown(f"<span class='badge {day_cls}' style='font-size:15px; margin-top:8px;'>{day_label} TIER</span>"
-                f"&nbsp;&nbsp; 📱 Total Distractions: **{total_distractions}**",
+    st.markdown(f"<span class='badge {day_cls}' style='font-size:15px; margin-top:8px;'>{day_label} TIER</span>",
                 unsafe_allow_html=True)
 
     st.markdown("#### Session Breakdown")
-    display_cols = [c for c in ["Subject", "Topic", "Assigned Min", "Actual Min", "Distractions", "Score", "XP"] if c in today_df.columns]
+    display_cols = [c for c in ["Subject", "Topic", "Assigned Min", "Actual Min", "Score", "XP"] if c in today_df.columns]
 
     # Card layout instead of a fixed-width column "table" — a rigid multi-column
     # grid has no room to reflow on narrow/mobile screens and just squishes each
