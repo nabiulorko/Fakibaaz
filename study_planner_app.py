@@ -677,7 +677,7 @@ if not st.session_state.get("user_id"):
     )
     st.markdown('<div class="id-gate-block">', unsafe_allow_html=True)
     _id_input = st.text_input(
-        "🔑 Enter your Student ID (e.g. 2202515)",
+        "🔑 Enter your Student ID (e.g. 2202195)",
         help="Use the same ID on your laptop and phone to see the same saved sessions.",
     )
     st.caption("This ID isn't a password — it's just a lookup key. Anyone who enters the "
@@ -835,7 +835,13 @@ with b4:
         st.rerun()
 
 if st.session_state.distractions > 0:
-    st.markdown(f"**Distractions logged this session:** {st.session_state.distractions} 📱")
+    dist_label_col, dist_undo_col = st.columns([4, 1])
+    with dist_label_col:
+        st.markdown(f"**Distractions logged this session:** {st.session_state.distractions} 📱")
+    with dist_undo_col:
+        if st.button("↩️ Undo", key="undo_distraction", help="Remove one wrongly-logged distraction"):
+            st.session_state.distractions -= 1
+            st.rerun()
 
 st.markdown("<br>", unsafe_allow_html=True)
 
