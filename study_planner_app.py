@@ -25,6 +25,8 @@ from google.oauth2.service_account import Credentials
 # --------------------------------------------------------------------------------------
 # CONFIG & CONSTANTS
 # --------------------------------------------------------------------------------------
+st.write=("")
+st.write=("")
 DATA_FILE = "study_data.csv"  # kept only as a local fallback name; primary storage is now Google Sheets
 LOGO_PATH = "logo.jpg"
 SHEET_TAB_NAME = "StudyData"
@@ -647,7 +649,6 @@ defaults = {
     "running": False,
     "elapsed": 0.0,
     "start_ts": None,
-    "distractions": 0,
     "session_active": False,
     "custom_subjects": [],
 }
@@ -806,7 +807,7 @@ if st.session_state.running:
     st_autorefresh(interval=1000, key="focus_tick")
 
 # Control buttons
-b1, b2, b3, b4 = st.columns(4)
+b1, b2, b4 = st.columns(3)
 with b1:
     if st.button("▶️ Start Focus", use_container_width=True, disabled=st.session_state.running):
         st.session_state.running = True
@@ -819,64 +820,61 @@ with b2:
         st.session_state.running = False
         st.session_state.start_ts = None
         st.rerun()
-with b3:
-    if st.button("📱 Distracted!", use_container_width=True):
-        st.session_state.distractions += 1
-        st.toast("Phone strike recorded 📱 (-5 pts)", icon="⚠️")
 with b4:
     if st.button("🔄 Reset", use_container_width=True):
         st.session_state.running = False
         st.session_state.elapsed = 0.0
         st.session_state.start_ts = None
-        st.session_state.distractions = 0
         st.session_state.session_active = False
         st.rerun()
-
-if st.session_state.distractions > 0:
-    dist_label_col, dist_undo_col = st.columns([4, 1])
-    with dist_label_col:
-        st.markdown(f"**Distractions logged this session:** {st.session_state.distractions} 📱")
-    with dist_undo_col:
-        if st.button("↩️ Undo", key="undo_distraction", help="Remove one wrongly-logged distraction"):
-            st.session_state.distractions -= 1
-            st.rerun()
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ---- Finish Topic ----
 finish_disabled = not (st.session_state.session_active or current_elapsed() >= 10)
 
+# Guard against a double-click firing two saves: Streamlit doesn't block a
+# second click while the first is still mid-flight (the Sheets write takes a
+# moment), so without this a fast double-tap can append two rows for the
+# same topic.
+if st.session_state.get("finish_submitting", False):
+    finish_disabled = True
+
 if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=True, disabled=finish_disabled):
-    actual_min = round(current_elapsed() / 60, 2)
-    score = compute_task_score(assigned_min, actual_min, st.session_state.distractions)
-    
-    df_existing = load_data(user_id)
-    if not df_existing.empty:
-        df_existing["Date"] = pd.to_datetime(df_existing["Date"]).dt.date
-        is_first_today = len(df_existing[df_existing["Date"] == the_date]) == 0
-    else:
-        is_first_today = True
-        
-    streak = compute_streak(df_existing)
-    xp = compute_task_xp(assigned_min, actual_min, st.session_state.distractions, is_first_today, streak)
-    
-    total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
-    rank_label, rank_cls = compute_tier(total_score_so_far)
-    
-    row = {
-        "Date": pd.to_datetime(the_date),
-        "Subject": subject,
-        "Topic": topic if topic else auto_topic_name,
-        "Assigned Min": assigned_min,
-        "Actual Min": actual_min,
-        "Distractions": st.session_state.distractions,
-        "Score": score,
-        "Rank": rank_label,
-        "XP": xp,
-        "Timestamp": datetime.now().isoformat(timespec="seconds")
-    }
-    save_row(row, user_id)
-    
+    st.session_state.finish_submitting = True
+    with st.spinner("💾 Saving your session..."):
+        actual_min = round(current_elapsed() / 60, 2)
+        score = compute_task_score(assigned_min, actual_min, 0)
+
+        df_existing = load_data(user_id)
+        if not df_existing.empty:
+            df_existing["Date"] = pd.to_datetime(df_existing["Date"]).dt.date
+            is_first_today = len(df_existing[df_existing["Date"] == the_date]) == 0
+        else:
+            is_first_today = True
+
+        streak = compute_streak(df_existing)
+        xp = compute_task_xp(assigned_min, actual_min, 0, is_first_today, streak)
+
+        total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
+        rank_label, rank_cls = compute_tier(total_score_so_far)
+
+        row = {
+            "Date": pd.to_datetime(the_date),
+            "Subject": subject,
+            "Topic": topic if topic else auto_topic_name,
+            "Assigned Min": assigned_min,
+            "Actual Min": actual_min,
+            "Distractions": 0,
+            "Score": score,
+            "Rank": rank_label,
+            "XP": xp,
+            "Timestamp": datetime.now().isoformat(timespec="seconds")
+        }
+        save_row(row, user_id)
+
+    st.session_state.finish_submitting = False
+
     if score >= 10.0:
         st.balloons()
         
@@ -886,7 +884,6 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
     st.session_state.running = False
     st.session_state.elapsed = 0.0
     st.session_state.start_ts = None
-    st.session_state.distractions = 0
     st.session_state.session_active = False
     st.rerun()
     
