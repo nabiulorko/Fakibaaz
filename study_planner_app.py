@@ -1,12 +1,10 @@
 """
 🎓 Fakibaaz — Gamified Focus & Study Tracker
 ---------------------------------------------
-New 5-Part Scoring & Progression Engine:
+Point Scoring & Tier Engine:
 1. Task Score: Base 10 pts + (Time Saved / Assigned * 10) early bonus OR - (Late / Assigned * 10) deduction.
-2. XP System: Task (+10), Early (+5 or +10 if >=50%), Daily goal (+25), Streaks (+30/+75).
-3. Level System: XP progression (L1: 0, L2: 100, L3: 250, L4: 450, L5: 700...).
-4. Tier System: Total Score determines Tier (Bronze, Silver, Gold, Platinum, Diamond, Master, Grandmaster).
-5. Ranking & Profile System: Complete Task -> Score + XP -> Tier + Level -> Ranking.
+2. Tier System: Total Score determines Tier (Bronze, Silver, Gold, Platinum, Diamond, Master, Grandmaster).
+3. Ranking & Profile System: Complete Task -> Score -> Tier -> Ranking.
 
 Run with:
     .venv/bin/streamlit run study_planner_app.py
@@ -374,6 +372,82 @@ html, body {
   }
 }
 
+.footer-card {
+  margin: 14px 0 8px;
+  padding: 18px 22px;
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.06);
+}
+.tier-range-line {
+  text-align: center;
+  font-weight: 400;
+  font-size: 14px;
+  color: #334155;
+  line-height: 1.8;
+  margin: 14px 0;
+}
+.tier-footer-divider {
+  border: none;
+  height: 1px;
+  background: #e2e8f0;
+  margin: 14px 0;
+}
+.tier-range-line strong {
+  font-weight: 600;
+}
+.footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: #475569;
+}
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.footer-brand img {
+  height: 38px;
+  width: auto;
+  display: block;
+  border-radius: 8px;
+}
+.footer-brand .footer-brand-text {
+  font-family: 'Poppins', sans-serif;
+  font-weight: 800;
+  font-size: 22px;
+  line-height: 1.1;
+  background: linear-gradient(135deg, #6366f1 0%, #06b6d4 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.footer-meta {
+  text-align: right;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.footer-meta a {
+  color: #4f46e5;
+  font-weight: 700;
+  text-decoration: none;
+}
+.footer-stack, .footer-copy {
+  color: #64748b;
+}
+@media (max-width: 640px) {
+  .footer-bar {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+  .footer-meta {
+    text-align: center;
+  }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -538,7 +612,7 @@ def export_to_excel(user_id: str, path="Study_Planner_Log.xlsx"):
     export = df.rename(columns={
         "Subject": "Course", "Assigned Min": "Assigned Time", "Actual Min": "Time Taken"
     })
-    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank", "XP"] if c in export.columns]
+    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank"] if c in export.columns]
     export[cols_to_export].to_excel(APP_DIR / path, index=False)
     return str(APP_DIR / path)
 
@@ -549,11 +623,11 @@ def get_export_csv(user_id: str) -> str:
     export = df.rename(columns={
         "Subject": "Course", "Assigned Min": "Assigned Time", "Actual Min": "Time Taken"
     })
-    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank", "XP"] if c in export.columns]
+    cols_to_export = [c for c in ["Date", "Course", "Topic", "Assigned Time", "Time Taken", "Score", "Rank"] if c in export.columns]
     return export[cols_to_export].to_csv(index=False)
 
 # --------------------------------------------------------------------------------------
-# NEW 5-PART SCORING, XP, LEVEL, TIER & RANKING SYSTEM
+# POINT SCORING, TIER & RANKING SYSTEM
 # --------------------------------------------------------------------------------------
 def _raw_task_score(assigned_min: float, actual_min: float) -> float:
     """
@@ -593,60 +667,6 @@ def compute_task_score(assigned_min: float, actual_min: float) -> float:
     if actual_min < 0.5:
         return 0.0
     return _raw_task_score(assigned_min, actual_min)
-
-def compute_task_xp(assigned_min: float, actual_min: float, is_first_today: bool = False, streak: int = 0) -> int:
-    """
-    ⭐ 2. XP System:
-    - Complete task -> +10 XP
-    - Finish early -> +5 XP
-    - Finish >= 50% early -> +10 XP
-    - Daily goal (1st task today) -> +25 XP
-    - 3-day streak -> +30 XP
-    - 7-day streak -> +75 XP
-    """
-    if actual_min < 0.5:
-        return 0
-
-    xp = 10  # Complete task base XP
-
-    if actual_min < assigned_min:
-        if actual_min <= 0.5 * assigned_min:
-            xp += 10  # Finish >= 50% early
-        else:
-            xp += 5   # Finish early
-
-    if is_first_today:
-        xp += 25 # Daily goal bonus
-
-    if streak == 3:
-        xp += 30 # 3-day streak
-    elif streak >= 7:
-        xp += 75 # 7-day streak
-
-    return xp
-
-def compute_level(total_xp: int) -> int:
-    """
-    🆙 3. Level System:
-    - Level 1: 0 XP
-    - Level 2: 100 XP
-    - Level 3: 250 XP
-    - Level 4: 450 XP
-    - Level 5: 700 XP...
-    """
-    if total_xp < 100: return 1
-    if total_xp < 250: return 2
-    if total_xp < 450: return 3
-    if total_xp < 700: return 4
-    
-    lvl = 5
-    req = 700
-    step = 300
-    while total_xp >= req + step:
-        req += step
-        step += 50
-        lvl += 1
-    return lvl
 
 def compute_tier(total_score: float):
     """
@@ -819,7 +839,7 @@ if _last_result:
         st.balloons()
     st.success(
         f"Topic Saved! Task Score: {_last_result['score']} pts · "
-        f"Tier: {_last_result['rank_label']} · +{_last_result['xp']} XP earned"
+        f"Tier: {_last_result['rank_label']}"
     )
 
 # --------------------------------------------------------------------------------------
@@ -876,9 +896,6 @@ st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 # --------------------------------------------------------------------------------------
 df_all = load_data(user_id).copy()
 total_score = float(df_all["Score"].sum()) if not df_all.empty else 0.0
-total_xp = int(df_all["XP"].sum()) if not df_all.empty else 0
-user_level = compute_level(total_xp)  # Level/XP stay lifetime — never decreases, per the guide
-
 if not df_all.empty:
     df_all_dated = df_all.copy()
     df_all_dated["Date"] = pd.to_datetime(df_all_dated["Date"]).dt.date
@@ -886,7 +903,6 @@ if not df_all.empty:
 else:
     today_rows = pd.DataFrame()
 today_total_score = float(today_rows["Score"].sum()) if not today_rows.empty else 0.0
-today_total_xp = int(today_rows["XP"].sum()) if not today_rows.empty else 0
 today_tasks = len(today_rows)
 today_tier, today_tier_cls = compute_tier(today_total_score)  # Tier now reflects THIS day only
 
@@ -905,12 +921,10 @@ with session_head_box:
         <div class="session-stats-block" style="text-align:right; line-height:1.7; padding-top:4px;">
           <span class="badge {today_tier_cls}" style="font-size:15px; padding:6px 16px;">{today_tier}</span>
           <br>
-          <span style="font-size:15px; font-weight:600; color:#1e293b;">⭐ Lvl {user_level}</span>
-          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">✅ {today_tasks} Job{'s' if today_tasks != 1 else ''}</span>
-          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">🎯 {today_total_score:.1f} pts</span>
-          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">⭐ +{today_total_xp} XP</span>
+          <span style="font-size:15px; font-weight:600; color:#1e293b;">✅ {today_tasks} Job{'s' if today_tasks != 1 else ''}</span>
+          &nbsp; <span style="font-size:15px; font-weight:600; color:#1e293b;">🎯 {today_total_score:.1f} pts today</span>
           <br>
-          <span style="font-size:13px; font-weight:600; color:#94a3b8;">(Overall: {total_score:.1f} pts · {total_xp:,} XP)</span>
+          <span style="font-size:13px; font-weight:600; color:#94a3b8;">Overall: {total_score:.1f} pts</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -980,9 +994,6 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
             else:
                 is_first_today = True
 
-            streak = compute_streak(df_existing, target_date=the_date)
-            xp = compute_task_xp(assigned_min, actual_min, is_first_today, streak)
-
             total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
             rank_label, rank_cls = compute_tier(total_score_so_far)
 
@@ -994,13 +1005,13 @@ if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=Tr
                 "Actual Min": actual_min,
                 "Score": score,
                 "Rank": rank_label,
-                "XP": xp,
+                "XP": 0,
                 "Timestamp": datetime.now().isoformat(timespec="seconds")
             }
             save_ok = save_row(row, user_id)
 
         if save_ok:
-            st.session_state.last_finish_result = {"score": score, "rank_label": rank_label, "xp": xp}
+            st.session_state.last_finish_result = {"score": score, "rank_label": rank_label}
 
             # Reset session only after the row is safely persisted.
             st.session_state.running = False
@@ -1034,21 +1045,18 @@ else:
     total_assigned = today_df["Assigned Min"].sum()
     total_actual = today_df["Actual Min"].sum()
     today_score = today_df["Score"].sum()
-    today_xp = int(today_df["XP"].sum())
-
     day_label, day_cls = compute_tier(today_score)  # Tier reflects THIS day's score, not lifetime
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Tasks Completed", len(today_df))
     m2.metric("Focus Time", f"{total_actual:.1f}m / {total_assigned:.0f}m")
     m3.metric("Today Task Score", f"{today_score:.1f} pts")
-    m4.metric("Today XP", f"+{today_xp} XP")
 
     st.markdown(f"<span class='badge {day_cls}' style='font-size:15px; margin-top:8px;'>{day_label} TIER</span>",
                 unsafe_allow_html=True)
 
     st.markdown("#### Session Breakdown")
-    display_cols = [c for c in ["Subject", "Topic", "Assigned Min", "Actual Min", "Score", "XP"] if c in today_df.columns]
+    display_cols = [c for c in ["Subject", "Topic", "Assigned Min", "Actual Min", "Score"] if c in today_df.columns]
 
     # Card layout instead of a fixed-width column "table" — a rigid multi-column
     # grid has no room to reflow on narrow/mobile screens and just squishes each
@@ -1074,3 +1082,22 @@ else:
                     if delete_row(user_id, row.to_dict()):
                         st.success("Task removed.")
                         st.rerun()
+# ─── Footer ────────────────────────────────────────────────────────────────────
+st.divider()
+footer_logo_tag = f'<img src="{_logo_base64(LOGO_PATH)}" alt="Fakibaaz logo">' if LOGO_PATH.exists() else ""
+st.markdown(f"""
+<div class="tier-range-line">
+    <strong>🪨 Bronze</strong> : 0 - 99 | <strong>🥈 Silver</strong> : 100 - 249 | <strong>🥇 Gold</strong> : 250 - 499 | <strong>💎 Platinum</strong> : 500 - 999 | <strong>💠 Diamond</strong> : 1,000 - 1,999 | <strong>👑 Master</strong> : 2,000 - 3,999 | <strong>🔥 Grandmaster</strong> : 4,000+
+</div>
+<hr class="tier-footer-divider">
+<div class="footer-card">
+    <div class="footer-bar">
+        <div class="footer-brand">{footer_logo_tag}<div class="footer-brand-text">Fakibaaz</div></div>
+        <div class="footer-meta">
+            Designed &amp; developed by <a href="https://www.linkedin.com/in/nabiulorko" target="_blank">Nabiul Orko</a><br>
+            <span class="footer-stack">Python · Pandas · Streamlit · Google Sheets</span><br>
+            <span class="footer-copy">© 2026 All Rights Reserved</span>
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
