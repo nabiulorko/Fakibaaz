@@ -11,6 +11,7 @@ Run with:
 """
 
 import time
+import threading
 import base64
 import html
 from pathlib import Path
@@ -154,6 +155,14 @@ st.markdown("""
     text-align: center;
     justify-content: center;
   }
+}
+
+/* Time elapsed caption under the timer: keep centered on all screen sizes,
+   not just mobile. */
+.st-key-session_head [data-testid="stCaptionContainer"] {
+  text-align: center;
+  justify-content: center;
+  display: flex;
 }
 
 /* Sidebar brand — logo + wordmark inline, no extra vertical gap */
@@ -480,25 +489,32 @@ def _get_worksheet():
     except Exception:
         return None
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=2, show_spinner=False)
 def load_data(user_id: str) -> pd.DataFrame:
-    """Load only this user's rows from Google Sheets or local CSV fallback."""
-    ws = _get_worksheet()
-    df = pd.DataFrame()
-    if ws is not None:
+    """Load this user's rows from the fast local cache.
+
+    Google Sheets is still used for background backup on save, but the live UI
+    reads locally so timer ticks and Finish clicks never wait on network calls.
+    If no local cache exists yet, we import from Sheets once.
+    """
+    df = pd.DataFrame(columns=COLUMNS)
+    if DATA_FILE.exists():
         try:
-            records = ws.get_all_records()
-            df = pd.DataFrame(records)
+            df = pd.read_csv(DATA_FILE)
         except Exception:
             df = pd.DataFrame(columns=COLUMNS)
     else:
-        if DATA_FILE.exists():
+        ws = _get_worksheet()
+        if ws is not None:
             try:
-                df = pd.read_csv(DATA_FILE)
+                df = pd.DataFrame(ws.get_all_records())
+                if not df.empty:
+                    for col in COLUMNS:
+                        if col not in df.columns:
+                            df[col] = ""
+                    df[COLUMNS].to_csv(DATA_FILE, index=False)
             except Exception:
                 df = pd.DataFrame(columns=COLUMNS)
-        else:
-            df = pd.DataFrame(columns=COLUMNS)
 
     for col in COLUMNS:
         if col not in df.columns:
@@ -506,6 +522,7 @@ def load_data(user_id: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
 
+    df = df.drop_duplicates(subset=["UserID", "Timestamp"], keep="last")
     df = df[df["UserID"].astype(str) == str(user_id)].reset_index(drop=True)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -521,89 +538,107 @@ def _append_local_row(row: dict):
     else:
         df_row.to_csv(DATA_FILE, index=False)
 
+def _append_cloud_row(row: dict, creds_info: dict, sheet_id: str):
+    try:
+        creds = Credentials.from_service_account_info(creds_info, scopes=SHEETS_SCOPES)
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(sheet_id)
+        try:
+            ws = sh.worksheet(SHEET_TAB_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=SHEET_TAB_NAME, rows=2000, cols=len(COLUMNS) + 2)
+            ws.append_row(COLUMNS)
+        ws.append_row([str(row.get(c, "")) for c in COLUMNS], value_input_option="USER_ENTERED")
+    except Exception:
+        pass
+
 def save_row(row: dict, user_id: str) -> bool:
     row = dict(row)
     row["UserID"] = user_id
     if isinstance(row.get("Date"), (pd.Timestamp, date, datetime)):
         row["Date"] = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
 
-    ws = _get_worksheet()
-    if ws is not None:
-        try:
-            values = [str(row.get(c, "")) for c in COLUMNS]
-            ws.append_row(values, value_input_option="USER_ENTERED")
-        except Exception as e:
-            st.warning(f"Cloud save failed; saved locally instead. Details: {e}")
-            try:
-                _append_local_row(row)
-            except Exception as local_error:
-                st.error(f"Failed to save locally: {local_error}")
-                return False
-    else:
-        try:
-            _append_local_row(row)
-        except Exception as e:
-            st.error(f"Failed to save locally: {e}")
-            return False
+    try:
+        _append_local_row(row)
+    except Exception as e:
+        st.error(f"Failed to save locally: {e}")
+        return False
+
     load_data.clear()
+
+    if "gcp_service_account" in st.secrets and "sheet_id" in st.secrets:
+        creds_info = dict(st.secrets["gcp_service_account"])
+        sheet_id = str(st.secrets["sheet_id"])
+        thread = threading.Thread(
+            target=_append_cloud_row,
+            args=(row.copy(), creds_info, sheet_id),
+            daemon=True,
+        )
+        thread.start()
     return True
 
 def delete_row(user_id: str, row_data: dict) -> bool:
-    """Delete a specific row matching UserID and Timestamp (or exact attributes)."""
-    ws = _get_worksheet()
+    """Delete a specific row matching UserID and Timestamp (or exact attributes).
+
+    The UI (load_data) reads from the local CSV cache whenever it exists, so a
+    delete MUST remove the row from that local file — deleting only from the
+    Google Sheet left the stale row in the local cache and the "deleted" task
+    kept reappearing. We always update the local CSV (the source of truth for
+    what's displayed) and additionally mirror the deletion to Sheets when
+    configured, best-effort.
+    """
     target_ts = str(row_data.get("Timestamp", ""))
     target_sub = str(row_data.get("Subject", ""))
     target_top = str(row_data.get("Topic", ""))
 
+    deleted_local = False
+    if DATA_FILE.exists():
+        try:
+            df = pd.read_csv(DATA_FILE)
+            if not df.empty:
+                if target_ts and "Timestamp" in df.columns:
+                    mask = (df["UserID"].astype(str) == str(user_id)) & (df["Timestamp"].astype(str) == target_ts)
+                else:
+                    mask = (df["UserID"].astype(str) == str(user_id)) & \
+                           (df["Subject"].astype(str) == target_sub) & \
+                           (df["Topic"].astype(str) == target_top)
+
+                df_to_keep = df[~mask]
+                if len(df_to_keep) < len(df):
+                    df_to_keep.to_csv(DATA_FILE, index=False)
+                    deleted_local = True
+        except Exception as e:
+            st.error(f"Error deleting from local cache: {e}")
+
+    deleted_cloud = False
+    ws = _get_worksheet()
     if ws is not None:
         try:
             all_values = ws.get_all_values()
-            if not all_values:
-                return False
-            header = all_values[0]
-            if "UserID" not in header:
-                return False
-            user_col = header.index("UserID")
-            ts_col = header.index("Timestamp") if "Timestamp" in header else -1
+            if all_values:
+                header = all_values[0]
+                if "UserID" in header:
+                    user_col = header.index("UserID")
+                    ts_col = header.index("Timestamp") if "Timestamp" in header else -1
 
-            for i, r in enumerate(all_values[1:], start=2):
-                if len(r) > user_col and r[user_col] == str(user_id):
-                    match = False
-                    if ts_col != -1 and len(r) > ts_col and target_ts:
-                        match = (r[ts_col] == target_ts)
-                    else:
-                        match = (len(r) > 3 and r[2] == target_sub and r[3] == target_top)
-                    if match:
-                        ws.delete_rows(i)
-                        load_data.clear()
-                        return True
-            return False
+                    for i, r in enumerate(all_values[1:], start=2):
+                        if len(r) > user_col and r[user_col] == str(user_id):
+                            match = False
+                            if ts_col != -1 and len(r) > ts_col and target_ts:
+                                match = (r[ts_col] == target_ts)
+                            else:
+                                match = (len(r) > 3 and r[2] == target_sub and r[3] == target_top)
+                            if match:
+                                ws.delete_rows(i)
+                                deleted_cloud = True
+                                break
         except Exception as e:
             st.error(f"Error deleting from Google Sheets: {e}")
-            return False
-    else:
-        if not DATA_FILE.exists():
-            return False
-        try:
-            df = pd.read_csv(DATA_FILE)
-            if df.empty:
-                return False
-            if target_ts and "Timestamp" in df.columns:
-                mask = (df["UserID"].astype(str) == str(user_id)) & (df["Timestamp"].astype(str) == target_ts)
-            else:
-                mask = (df["UserID"].astype(str) == str(user_id)) & \
-                       (df["Subject"].astype(str) == target_sub) & \
-                       (df["Topic"].astype(str) == target_top)
 
-            df_to_keep = df[~mask]
-            if len(df_to_keep) < len(df):
-                df_to_keep.to_csv(DATA_FILE, index=False)
-                load_data.clear()
-                return True
-            return False
-        except Exception as e:
-            st.error(f"Error deleting from CSV: {e}")
-            return False
+    if deleted_local or deleted_cloud:
+        load_data.clear()
+        return True
+    return False
 
 def export_to_excel(user_id: str, path="Study_Planner_Log.xlsx"):
     df = load_data(user_id)
@@ -980,43 +1015,34 @@ if st.session_state.get("finish_submitting", False):
 
 if st.button("🏁 Finish & Score Topic", type="primary", use_container_width=True, disabled=finish_disabled):
     st.session_state.finish_submitting = True
+    clicked_elapsed = current_elapsed()
+    st.session_state.running = False
+    st.session_state.elapsed = clicked_elapsed
+    st.session_state.start_ts = None
     save_ok = False
     try:
-        with st.spinner("💾 Saving your session..."):
-            actual_min = round(current_elapsed() / 60, 2)
-            score = compute_task_score(assigned_min, actual_min)
+        actual_min = round(clicked_elapsed / 60, 2)
+        score = compute_task_score(assigned_min, actual_min)
 
-            df_existing = load_data(user_id).copy()
-            if not df_existing.empty:
-                df_existing_dated = df_existing.copy()
-                df_existing_dated["Date"] = pd.to_datetime(df_existing_dated["Date"], errors="coerce").dt.date
-                is_first_today = len(df_existing_dated[df_existing_dated["Date"] == the_date]) == 0
-            else:
-                is_first_today = True
+        total_score_so_far = total_score + score
+        rank_label, rank_cls = compute_tier(total_score_so_far)
 
-            total_score_so_far = df_existing["Score"].sum() + score if not df_existing.empty else score
-            rank_label, rank_cls = compute_tier(total_score_so_far)
-
-            row = {
-                "Date": the_date.strftime("%Y-%m-%d") if isinstance(the_date, (date, datetime)) else str(the_date),
-                "Subject": subject,
-                "Topic": topic if topic else auto_topic_name,
-                "Assigned Min": assigned_min,
-                "Actual Min": actual_min,
-                "Score": score,
-                "Rank": rank_label,
-                "XP": 0,
-                "Timestamp": datetime.now().isoformat(timespec="seconds")
-            }
-            save_ok = save_row(row, user_id)
+        row = {
+            "Date": the_date.strftime("%Y-%m-%d") if isinstance(the_date, (date, datetime)) else str(the_date),
+            "Subject": subject,
+            "Topic": topic if topic else auto_topic_name,
+            "Assigned Min": assigned_min,
+            "Actual Min": actual_min,
+            "Score": score,
+            "Rank": rank_label,
+            "XP": 0,
+            "Timestamp": datetime.now().isoformat(timespec="seconds")
+        }
+        save_ok = save_row(row, user_id)
 
         if save_ok:
             st.session_state.last_finish_result = {"score": score, "rank_label": rank_label}
-
-            # Reset session only after the row is safely persisted.
-            st.session_state.running = False
             st.session_state.elapsed = 0.0
-            st.session_state.start_ts = None
             st.session_state.session_active = False
             st.rerun()
     finally:
